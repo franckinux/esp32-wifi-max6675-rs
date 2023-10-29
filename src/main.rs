@@ -1,37 +1,51 @@
-//! Blinks an LED
-//!
-//! This assumes that a LED is connected to the pin assigned to `led`. (GPIO5)
-
 #![no_std]
 #![no_main]
 
-use hal::{
+// use panic_halt as _;
+use esp_backtrace as _;
+
+use esp32c3_hal::{
     clock::ClockControl,
     gpio::IO,
     peripherals::Peripherals,
     prelude::*,
+    Rng,
     spi,
+    systimer::SystemTimer,
     timer::TimerGroup,
     Delay,
     Rtc,
 };
 
-use core::panic::PanicInfo;
+use embedded_io::blocking::*;
+use embedded_svc::{
+    ipv4::Interface,
+    wifi::{AccessPointInfo, ClientConfiguration, Configuration, Wifi},
+};
+use esp_wifi::{
+    current_millis, EspWifiInitFor, initialize,
+    wifi::{
+        {WifiError, WifiMode},
+        utils::create_network_interface,
+    },
+    wifi_interface::WifiStack,
+};
+use smoltcp::{
+    iface::SocketStorage,
+    wire::{ IpAddress, Ipv4Address},
+};
 
-use esp_println::println;
+use esp_println::{print, println};
 
 
-#[panic_handler]
-fn panic(_panic: &PanicInfo<'_>) -> ! {
-    loop {}
-}
-
+const SSID: &str = "XXXXXXXXXXXX";
+const PASSWORD: &str = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
 
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
     let mut system = peripherals.SYSTEM.split();
-    let mut clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+    let clocks = ClockControl::max(system.clock_control).freeze();
 
     // Disable the watchdog timers. For the ESP32-C3, this includes the Super WDT,
     // the RTC WDT, and the TIMG WDTs.
@@ -54,10 +68,83 @@ fn main() -> ! {
     wdt0.disable();
     wdt1.disable();
 
-    // Set GPIO5 as an output, and set its state high initially.
-    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+    // wifi
+    let timer = SystemTimer::new(peripherals.SYSTIMER).alarm0;
+    let init = initialize(
+        EspWifiInitFor::Wifi,
+        timer,
+        Rng::new(peripherals.RNG),
+        system.radio_clock_control,
+        &clocks,
+    ).unwrap();
+
+    let (wifi, ..) = peripherals.RADIO.split();
+    let mut socket_set_entries: [SocketStorage; 3] = Default::default();
+    let (iface, device, mut controller, sockets) =
+        create_network_interface(&init, wifi, WifiMode::Sta, &mut socket_set_entries).unwrap();
+    let wifi_stack = WifiStack::new(iface, device, sockets, current_millis);
+
+    let client_config = Configuration::Client(ClientConfiguration {
+        ssid: SSID.into(),
+        password: PASSWORD.into(),
+        ..Default::default()
+    });
+    let res = controller.set_configuration(&client_config);
+    println!("wifi_set_configuration returned {:?}", res);
+
+    controller.start().unwrap();
+    println!("is wifi started: {:?}", controller.is_started());
+
+    println!("Start Wifi Scan");
+    let res: Result<(heapless::Vec<AccessPointInfo, 10>, usize), WifiError> = controller.scan_n();
+    if let Ok((res, _count)) = res {
+        for ap in res {
+            println!("{:?}", ap);
+        }
+    }
+
+    println!("{:?}", controller.get_capabilities());
+    println!("wifi_connect {:?}", controller.connect());
+
+    // wait to get connected
+    println!("Wait to get connected");
+    loop {
+        let res = controller.is_connected();
+        match res {
+            Ok(connected) => {
+                if connected {
+                    break;
+                }
+            }
+            Err(err) => {
+                println!("{:?}", err);
+                loop {}
+            }
+        }
+    }
+    println!("{:?}", controller.is_connected());
+
+    // wait for getting an ip address
+    println!("Wait to get an ip address");
+    loop {
+        wifi_stack.work();
+
+        if wifi_stack.is_iface_up() {
+            println!("got ip {:?}", wifi_stack.get_ip_info());
+            break;
+        }
+    }
+
+    println!("Start busy loop on main");
+
+    let mut rx_buffer = [0u8; 1536];
+    let mut tx_buffer = [0u8; 1536];
+    let mut socket = wifi_stack.get_socket(&mut rx_buffer, &mut tx_buffer);
 
     // led
+    // Set GPIO8 as an output, and set its state high initially.
+    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+
     let mut led = io.pins.gpio8.into_push_pull_output();
     led.set_high().unwrap();
 
@@ -67,7 +154,7 @@ fn main() -> ! {
     let miso = io.pins.gpio2;
     let mosi = io.pins.gpio7;
 
-    let mut spi = hal::spi::Spi::new(
+    let mut spi = spi::Spi::new(
         peripherals.SPI2,
         sclk,
         mosi,
@@ -76,7 +163,7 @@ fn main() -> ! {
         100u32.kHz(),
         spi::SpiMode::Mode0,
         &mut system.peripheral_clock_control,
-        &mut clocks,
+        &clocks,
     );
 
     // Initialize the Delay peripheral, and use it to toggle the LED state in a
@@ -87,16 +174,45 @@ fn main() -> ! {
     loop {
         spi.transfer(&mut data).unwrap();
         let mut temp = u16::from_be_bytes(data[..].try_into().unwrap());
-        // test temp & 04. == 1 if error
-        if temp & 4 == 0 {
-            temp = temp >> 3;
-            println!("temperature = {}°C", temp as f64 * 0.25);
-        } else {
-            println!("no sensor attached");
+        if temp & 4 == 1 {
+            println!("No sensor attached");
+            delay.delay_ms(500u32);
+            continue;
         }
+        temp = temp >> 3;
+        let temp = temp as f32 * 0.25;
+        println!("temperature = {}°C", temp);
 
         led.toggle().unwrap();
 
-        delay.delay_ms(500u32);
+        println!("Making HTTP request");
+        socket.work();
+        socket.open(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 103)), 8080).unwrap();
+        socket.write(b"GET / HTTP/1.0\r\nHost: 192.168.1.103:8080\r\n\r\n").unwrap();
+        socket.flush().unwrap();
+
+        let wait_end = current_millis() + 20 * 1000;
+        loop {
+            let mut buffer = [0u8; 512];
+            if let Ok(len) = socket.read(&mut buffer) {
+                let to_print = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
+                print!("{}", to_print);
+            } else {
+                break;
+            }
+
+            if current_millis() > wait_end {
+                println!("Timeout");
+                break;
+            }
+        }
+        println!();
+
+        socket.disconnect();
+
+        let wait_end = current_millis() + 5 * 1000;
+        while current_millis() < wait_end {
+            socket.work();
+        }
     }
 }

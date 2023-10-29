@@ -6,6 +6,13 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-hal = { package = "esp32c3-hal", version = "0.12.0" }
+panic-halt = "0.2.0"
+embedded-io = "0.4.0"
+heapless = { version = "0.7.16", default-features = false }
+esp32c3-hal = { version = "0.12.0" }
 esp-backtrace = { version = "0.9.0", features = ["esp32c3", "panic-handler", "exception-handler", "print-uart"] }
 esp-println = { version = "0.7.0", features = ["esp32c3"] }
+
+embedded-svc = { version = "0.25.1", default-features = false, features = [] }
+esp-wifi = { git = "https://github.com/esp-rs/esp-wifi.git", rev = "b86650627544ef86ad9c6ab2c3c5eb577e8e3b38", default-features = false, features = ["esp32c3", "wifi", "utils"] }
+smoltcp = { version = "0.10.0", default-features=false, features = ["proto-igmp", "proto-ipv4", "proto-dns", "socket-tcp", "socket-icmp", "socket-udp", "socket-dns", "medium-ethernet", "proto-dhcpv4", "socket-raw", "socket-dhcpv4"] }

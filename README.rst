@@ -1,7 +1,7 @@
 Instructions from https://github.com/esp-rs/rust-build.
 
-Installation (to be verified
-============================)
+Installation (to be verified)
+=============================
 
 .. code:: console
 
@@ -32,4 +32,4 @@ Building and flashing
 .. code:: console
 
         cargo build
-        cargo espflash flash <SERIAL>
+        cargo run

@@ -4,6 +4,8 @@
 // use panic_halt as _;
 use esp_backtrace as _;
 
+use heapless::String;
+
 use esp32c3_hal::{
     clock::ClockControl,
     gpio::IO,
@@ -37,6 +39,17 @@ use smoltcp::{
 
 use esp_println::{print, println};
 
+// module used for isolating core::fmt::Write that conflicts with embedded_io::blocking::Write
+// used in esp_wifi::wifi_interface
+mod isolated_write {
+    use core::fmt::Write;
+    use heapless::String;
+
+    pub fn write_http_request_string(s: &mut String<128>, temp: f32) -> () {
+        s.truncate(0);
+        write!(s, "GET /temp/1/{:.2} HTTP/1.0\r\nHost: 192.168.1.103:8080\r\n\r\n", temp).unwrap();
+    }
+}
 
 const SSID: &str = "XXXXXXXXXXXX";
 const PASSWORD: &str = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
@@ -171,7 +184,9 @@ fn main() -> ! {
     let mut delay = Delay::new(&clocks);
 
     let mut data = [0u8; 2];
+    let mut request: String<128> = String::new();
     loop {
+        // get temperature from max6675
         spi.transfer(&mut data).unwrap();
         let mut temp = u16::from_be_bytes(data[..].try_into().unwrap());
         if temp & 4 == 1 {
@@ -183,12 +198,14 @@ fn main() -> ! {
         let temp = temp as f32 * 0.25;
         println!("temperature = {}°C", temp);
 
+        // toggle led
         led.toggle().unwrap();
 
         println!("Making HTTP request");
+        isolated_write::write_http_request_string(&mut request, temp);
         socket.work();
         socket.open(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 103)), 8080).unwrap();
-        socket.write(b"GET / HTTP/1.0\r\nHost: 192.168.1.103:8080\r\n\r\n").unwrap();
+        socket.write(request.as_bytes()).unwrap();
         socket.flush().unwrap();
 
         let wait_end = current_millis() + 20 * 1000;

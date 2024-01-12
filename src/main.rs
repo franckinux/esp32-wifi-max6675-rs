@@ -12,29 +12,29 @@ use esp32c3_hal::{
     peripherals::Peripherals,
     prelude::*,
     Rng,
-    spi,
+    spi::{master::Spi, SpiMode},
     systimer::SystemTimer,
     timer::TimerGroup,
     Delay,
     Rtc,
 };
 
-use embedded_io::blocking::*;
 use embedded_svc::{
+    io::{Read, Write},
     ipv4::Interface,
     wifi::{AccessPointInfo, ClientConfiguration, Configuration, Wifi},
 };
 use esp_wifi::{
     current_millis, EspWifiInitFor, initialize,
     wifi::{
-        {WifiError, WifiMode},
+        {WifiError, WifiStaDevice},
         utils::create_network_interface,
     },
     wifi_interface::WifiStack,
 };
 use smoltcp::{
     iface::SocketStorage,
-    wire::{ IpAddress, Ipv4Address},
+    wire::{IpAddress, Ipv4Address},
 };
 
 use esp_println::{print, println};
@@ -57,7 +57,7 @@ const PASSWORD: &str = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
-    let mut system = peripherals.SYSTEM.split();
+    let system = peripherals.SYSTEM.split();
     let clocks = ClockControl::max(system.clock_control).freeze();
 
     // Disable the watchdog timers. For the ESP32-C3, this includes the Super WDT,
@@ -66,13 +66,11 @@ fn main() -> ! {
     let timer_group0 = TimerGroup::new(
         peripherals.TIMG0,
         &clocks,
-        &mut system.peripheral_clock_control,
     );
     let mut wdt0 = timer_group0.wdt;
     let timer_group1 = TimerGroup::new(
         peripherals.TIMG1,
         &clocks,
-        &mut system.peripheral_clock_control,
     );
     let mut wdt1 = timer_group1.wdt;
 
@@ -91,10 +89,10 @@ fn main() -> ! {
         &clocks,
     ).unwrap();
 
-    let (wifi, ..) = peripherals.RADIO.split();
+    let wifi = peripherals.WIFI;
     let mut socket_set_entries: [SocketStorage; 3] = Default::default();
     let (iface, device, mut controller, sockets) =
-        create_network_interface(&init, wifi, WifiMode::Sta, &mut socket_set_entries).unwrap();
+        create_network_interface(&init, wifi, WifiStaDevice, &mut socket_set_entries).unwrap();
     let wifi_stack = WifiStack::new(iface, device, sockets, current_millis);
 
     let client_config = Configuration::Client(ClientConfiguration {
@@ -167,16 +165,11 @@ fn main() -> ! {
     let miso = io.pins.gpio2;
     let mosi = io.pins.gpio7;
 
-    let mut spi = spi::Spi::new(
-        peripherals.SPI2,
-        sclk,
-        mosi,
-        miso,
-        cs,
-        100u32.kHz(),
-        spi::SpiMode::Mode0,
-        &mut system.peripheral_clock_control,
-        &clocks,
+    let mut spi = Spi::new(peripherals.SPI2, 100u32.kHz(), SpiMode::Mode0, &clocks).with_pins(
+        Some(sclk),
+        Some(mosi),
+        Some(miso),
+        Some(cs),
     );
 
     // Initialize the Delay peripheral, and use it to toggle the LED state in a

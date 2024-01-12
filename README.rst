@@ -18,6 +18,7 @@ Installation (to be verified)
         cargo install espup
         sudo apt install libudev-dev
         cargo install espflash
+        cargo install cargo-espmonitor
 
 Project creation
 ================
@@ -33,3 +34,9 @@ Building and flashing
 
         cargo build
         cargo run
+
+Just monitoring :
+
+.. code:: console
+
+    cargo espmonitor -c esp32c3 /dev/ttyACM0

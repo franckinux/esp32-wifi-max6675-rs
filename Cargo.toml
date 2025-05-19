@@ -1,19 +1,57 @@
 [package]
 name = "thermocouple-rs"
 version = "0.1.0"
-authors = ["franckinux <contact@franck-barbenoire.fr>"]
+authors = ["franckinux <fbarbenoire@gmail.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 panic-halt = "0.2.0"
-embedded-io = "0.4.0"
-heapless = { version = "0.7.16", default-features = false }
+embedded-io = "0.6.1"
+heapless = { version = "0.8.0", default-features = false }
 embedded-hal = { version = "0.2.7", features = ["unproven"] }
-esp32c3-hal = { version = "0.14.0" }
-esp-backtrace = { version = "0.9.0", features = ["esp32c3", "panic-handler", "exception-handler", "print-uart"] }
-esp-println = { version = "0.7.0", features = ["esp32c3"] }
+esp-hal = { version = "1.0.0-beta.0", features = ["esp32c3", "unstable"] }
+esp-println = { version = "0.13.1", features = ["esp32c3", "log"] }
+embedded-svc = { version = "0.28.1", default-features = false }
+esp-alloc = "0.7.0"
 
-embedded-svc = { version = "0.26.4", default-features = false }
-esp-wifi = { version = "0.2.0", default-features = false, features = ["esp32c3", "wifi", "utils", "tcp", "dhcpv4"] }
-smoltcp = { version = "0.10.0", default-features=false, features = ["proto-igmp", "proto-ipv4", "proto-dns", "socket-tcp", "socket-icmp", "socket-udp", "socket-dns", "medium-ethernet", "proto-dhcpv4", "socket-raw", "socket-dhcpv4"] }
+[dependencies.blocking-network-stack]
+git = "https://github.com/bjoernQ/blocking-network-stack.git"
+rev = "b3ecefc222d8806edd221f266999ca339c52d34e"
+default-features = false
+features = ["dhcpv4", "tcp",]
+
+[dependencies.esp-backtrace]
+version = "0.15.1"
+features = ["esp32c3", "panic-handler", "println", "exception-handler"]
+
+[dependencies.smoltcp]
+version = "0.12.0"
+default-features=false
+features = [
+  "medium-ethernet", "multicast", "proto-dhcpv4", "proto-dns", "proto-ipv4",
+  "socket-dns", "socket-icmp", "socket-raw", "socket-tcp", "socket-udp"
+]
+
+[dependencies.esp-wifi]
+version = "0.13.0"
+features = ["esp32c3", "smoltcp", "wifi"]
+optional = true
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+debug            = 2
+debug-assertions = false
+incremental      = false
+lto              = 'fat'
+opt-level        = 's'
+overflow-checks  = false
+
+[features]
+default = ["esp-wifi"]
+esp-wifi = ["dep:esp-wifi"]

@@ -1,43 +1,34 @@
 #![no_std]
 #![no_main]
 
-// use panic_halt as _;
-use esp_backtrace as _;
 
+use core::net::Ipv4Addr;
+
+// use fugit::rate::ExtU32;
 use heapless::String;
-
-use esp32c3_hal::{
-    clock::ClockControl,
-    gpio::IO,
-    peripherals::Peripherals,
-    prelude::*,
-    Rng,
-    spi::{master::Spi, SpiMode},
-    systimer::SystemTimer,
-    timer::TimerGroup,
-    Delay,
-    Rtc,
+use blocking_network_stack::Stack;
+use embedded_io::*;
+use esp_alloc as _;
+use esp_backtrace as _;
+use esp_hal::{
+    clock::CpuClock,
+    delay::Delay,
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    main,
+    rng::Rng,
+    spi::{master, Mode},
+    time::{self, Duration, Rate},
+    timer::timg::TimerGroup,
 };
-
-use embedded_svc::{
-    io::{Read, Write},
-    ipv4::Interface,
-    wifi::{AccessPointInfo, ClientConfiguration, Configuration, Wifi},
-};
+use esp_println::{print, println};
 use esp_wifi::{
-    current_millis, EspWifiInitFor, initialize,
-    wifi::{
-        {WifiError, WifiStaDevice},
-        utils::create_network_interface,
-    },
-    wifi_interface::WifiStack,
+    init,
+    wifi::{ClientConfiguration, Configuration},
 };
 use smoltcp::{
-    iface::SocketStorage,
-    wire::{IpAddress, Ipv4Address},
+    iface::{SocketSet, SocketStorage},
+    wire::{DhcpOption, IpAddress},
 };
-
-use esp_println::{print, println};
 
 // module used for isolating core::fmt::Write that conflicts with embedded_io::blocking::Write
 // used in esp_wifi::wifi_interface
@@ -51,53 +42,49 @@ mod isolated_write {
     }
 }
 
-const SSID: &str = "XXXXXXXXXXXX";
-const PASSWORD: &str = "XXXXXXXXXXXXXXXXXXXXXXXXXX";
+const SSID: &str = env!("SSID");
+const PASSWORD: &str = env!("PASSWORD");
 
-#[entry]
+#[main]
 fn main() -> ! {
-    let peripherals = Peripherals::take();
-    let system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    esp_println::logger::init_logger_from_env();
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let peripherals = esp_hal::init(config);
 
-    // Disable the watchdog timers. For the ESP32-C3, this includes the Super WDT,
-    // the RTC WDT, and the TIMG WDTs.
-    let mut rtc = Rtc::new(peripherals.RTC_CNTL);
-    let timer_group0 = TimerGroup::new(
-        peripherals.TIMG0,
-        &clocks,
-    );
-    let mut wdt0 = timer_group0.wdt;
-    let timer_group1 = TimerGroup::new(
-        peripherals.TIMG1,
-        &clocks,
-    );
-    let mut wdt1 = timer_group1.wdt;
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
-    rtc.swd.disable();
-    rtc.rwdt.disable();
-    wdt0.disable();
-    wdt1.disable();
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-    // wifi
-    let timer = SystemTimer::new(peripherals.SYSTIMER).alarm0;
-    let init = initialize(
-        EspWifiInitFor::Wifi,
-        timer,
-        Rng::new(peripherals.RNG),
-        system.radio_clock_control,
-        &clocks,
-    ).unwrap();
+    let mut rng = Rng::new(peripherals.RNG);
 
-    let wifi = peripherals.WIFI;
+    let esp_wifi_ctrl = init(timg0.timer0, rng.clone(), peripherals.RADIO_CLK).unwrap();
+
+    let (mut controller, interfaces) =
+        esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
+
+    let mut device = interfaces.sta;
+    let iface = create_interface(&mut device);
+
     let mut socket_set_entries: [SocketStorage; 3] = Default::default();
-    let (iface, device, mut controller, sockets) =
-        create_network_interface(&init, wifi, WifiStaDevice, &mut socket_set_entries).unwrap();
-    let wifi_stack = WifiStack::new(iface, device, sockets, current_millis);
+    let mut socket_set = SocketSet::new(&mut socket_set_entries[..]);
+    let mut dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
+    // we can set a hostname here (or add other DHCP options)
+    dhcp_socket.set_outgoing_options(&[DhcpOption {
+        kind: 12,
+        data: b"esp-wifi",
+    }]);
+    socket_set.add(dhcp_socket);
+
+    let now = || time::Instant::now().duration_since_epoch().as_millis();
+    let stack = Stack::new(iface, device, socket_set, now, rng.random());
+
+    controller
+        .set_power_saving(esp_wifi::config::PowerSaveMode::None)
+        .unwrap();
 
     let client_config = Configuration::Client(ClientConfiguration {
-        ssid: SSID.into(),
-        password: PASSWORD.into(),
+        ssid: SSID.try_into().unwrap(),
+        password: PASSWORD.try_into().unwrap(),
         ..Default::default()
     });
     let res = controller.set_configuration(&client_config);
@@ -107,26 +94,22 @@ fn main() -> ! {
     println!("is wifi started: {:?}", controller.is_started());
 
     println!("Start Wifi Scan");
-    let res: Result<(heapless::Vec<AccessPointInfo, 10>, usize), WifiError> = controller.scan_n();
+    let res = controller.scan_n::<10>();
     if let Ok((res, _count)) = res {
         for ap in res {
             println!("{:?}", ap);
         }
     }
 
-    println!("{:?}", controller.get_capabilities());
+    println!("{:?}", controller.capabilities());
     println!("wifi_connect {:?}", controller.connect());
 
     // wait to get connected
     println!("Wait to get connected");
     loop {
-        let res = controller.is_connected();
-        match res {
-            Ok(connected) => {
-                if connected {
-                    break;
-                }
-            }
+        match controller.is_connected() {
+            Ok(true) => break,
+            Ok(false) => {}
             Err(err) => {
                 println!("{:?}", err);
                 loop {}
@@ -138,10 +121,10 @@ fn main() -> ! {
     // wait for getting an ip address
     println!("Wait to get an ip address");
     loop {
-        wifi_stack.work();
+        stack.work();
 
-        if wifi_stack.is_iface_up() {
-            println!("got ip {:?}", wifi_stack.get_ip_info());
+        if stack.is_iface_up() {
+            println!("got ip {:?}", stack.get_ip_info());
             break;
         }
     }
@@ -150,31 +133,25 @@ fn main() -> ! {
 
     let mut rx_buffer = [0u8; 1536];
     let mut tx_buffer = [0u8; 1536];
-    let mut socket = wifi_stack.get_socket(&mut rx_buffer, &mut tx_buffer);
+    let mut socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
 
     // led
     // Set GPIO8 as an output, and set its state high initially.
-    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
-
-    let mut led = io.pins.gpio8.into_push_pull_output();
-    led.set_high().unwrap();
+    let mut led = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
 
     // max6675
-    let cs = io.pins.gpio10;
-    let sclk = io.pins.gpio6;
-    let miso = io.pins.gpio2;
-    let mosi = io.pins.gpio7;
+    let cs = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
+    let sclk = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    let miso = Input::new(peripherals.GPIO2, InputConfig::default().with_pull(Pull::None));
+    let mosi = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
 
-    let mut spi = Spi::new(peripherals.SPI2, 100u32.kHz(), SpiMode::Mode0, &clocks).with_pins(
-        Some(sclk),
-        Some(mosi),
-        Some(miso),
-        Some(cs),
-    );
+    let config = master::Config::default().with_frequency(Rate::from_khz(100)).with_mode(Mode::_0);
+    let mut spi = master::Spi::new(peripherals.SPI2, config).unwrap()
+        .with_sck(sclk).with_mosi(mosi).with_miso(miso).with_cs(cs);
 
     // Initialize the Delay peripheral, and use it to toggle the LED state in a
     // loop.
-    let mut delay = Delay::new(&clocks);
+    let delay = Delay::new();
 
     let mut data = [0u8; 2];
     let mut request: String<128> = String::new();
@@ -184,7 +161,7 @@ fn main() -> ! {
         let mut temp = u16::from_be_bytes(data[..].try_into().unwrap());
         if temp & 4 == 1 {
             println!("No sensor attached");
-            delay.delay_ms(500u32);
+            delay.delay_millis(500u32);
             continue;
         }
         temp = temp >> 3;
@@ -192,26 +169,28 @@ fn main() -> ! {
         println!("temperature = {}°C", temp);
 
         // toggle led
-        led.toggle().unwrap();
+        led.toggle();
 
         println!("Making HTTP request");
         isolated_write::write_http_request_string(&mut request, temp);
         socket.work();
-        socket.open(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 103)), 8080).unwrap();
-        socket.write(request.as_bytes()).unwrap();
+
+        socket
+            .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 1, 103)), 8080)
+            .unwrap();
+
+        socket
+            .write(request.as_bytes())
+            .unwrap();
         socket.flush().unwrap();
 
-        let wait_end = current_millis() + 20 * 1000;
-        loop {
-            let mut buffer = [0u8; 512];
-            if let Ok(len) = socket.read(&mut buffer) {
-                let to_print = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
-                print!("{}", to_print);
-            } else {
-                break;
-            }
+        let deadline = time::Instant::now() + Duration::from_secs(20);
+        let mut buffer = [0u8; 512];
+        while let Ok(len) = socket.read(&mut buffer) {
+            let to_print = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
+            print!("{}", to_print);
 
-            if current_millis() > wait_end {
+            if time::Instant::now() > deadline {
                 println!("Timeout");
                 break;
             }
@@ -220,9 +199,30 @@ fn main() -> ! {
 
         socket.disconnect();
 
-        let wait_end = current_millis() + 5 * 1000;
-        while current_millis() < wait_end {
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        while time::Instant::now() < deadline {
             socket.work();
         }
     }
+}
+
+// some smoltcp boilerplate
+fn timestamp() -> smoltcp::time::Instant {
+    smoltcp::time::Instant::from_micros(
+        esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_micros() as i64,
+    )
+}
+
+pub fn create_interface(device: &mut esp_wifi::wifi::WifiDevice) -> smoltcp::iface::Interface {
+    // users could create multiple instances but since they only have one WifiDevice
+    // they probably can't do anything bad with that
+    smoltcp::iface::Interface::new(
+        smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
+            smoltcp::wire::EthernetAddress::from_bytes(&device.mac_address()),
+        )),
+        device,
+        timestamp(),
+    )
 }

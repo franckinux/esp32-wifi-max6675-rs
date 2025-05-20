@@ -1007,7 +1007,6 @@ name = "thermocouple-rs"
 version = "0.1.0"
 dependencies = [
  "blocking-network-stack",
- "embedded-hal 0.2.7",
  "embedded-io",
  "embedded-svc",
  "esp-alloc",

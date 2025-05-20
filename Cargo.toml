@@ -9,7 +9,6 @@ license = "MIT OR Apache-2.0"
 panic-halt = "0.2.0"
 embedded-io = "0.6.1"
 heapless = { version = "0.8.0", default-features = false }
-embedded-hal = { version = "0.2.7", features = ["unproven"] }
 esp-hal = { version = "1.0.0-beta.0", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.13.1", features = ["esp32c3", "log"] }
 embedded-svc = { version = "0.28.1", default-features = false }
